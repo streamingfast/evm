@@ -12,8 +12,8 @@ use crate::{
     block::{
         state_changes::{balance_increment_state, post_block_balance_increments},
         BlockExecutionError, BlockExecutionResult, BlockExecutor, BlockExecutorFactory,
-        BlockExecutorFor, BlockValidationError, ExecutableTx, GasOutput, OnStateHook,
-        StateChangePostBlockSource, StateChangeSource, StateDB, SystemCaller, TxResult,
+        BlockValidationError, ExecutableTx, GasOutput, OnStateHook, StateChangePostBlockSource,
+        StateChangeSource, StateDB, SystemCaller, TxResult,
     },
     Evm, EvmFactory, FromRecoveredTx, FromTxWithEncoded, RecoveredTx,
 };
@@ -24,7 +24,7 @@ use alloy_hardforks::EthereumHardfork;
 use alloy_primitives::{Bytes, Log, B256};
 use revm::{
     context::Block, context_interface::result::ResultAndState, database::DatabaseCommitExt,
-    primitives::eip7825::TX_GAS_LIMIT_CAP, DatabaseCommit, Inspector,
+    DatabaseCommit, Inspector,
 };
 
 /// Context for Ethereum block execution.
@@ -87,7 +87,11 @@ pub struct EthTxResult<H, T> {
     pub tx_type: T,
 }
 
-impl<H, T> TxResult for EthTxResult<H, T> {
+impl<H, T> TxResult for EthTxResult<H, T>
+where
+    H: Send + 'static,
+    T: Send + 'static,
+{
     type HaltReason = H;
 
     fn result(&self) -> &ResultAndState<Self::HaltReason> {
@@ -138,6 +142,7 @@ where
     E: Evm<DB: StateDB, Tx: FromRecoveredTx<R::Transaction> + FromTxWithEncoded<R::Transaction>>,
     Spec: EthExecutorSpec,
     R: ReceiptBuilder<Transaction: Transaction + Encodable2718, Receipt: TxReceipt<Log = Log>>,
+    <R::Transaction as TransactionEnvelope>::TxType: Send + 'static,
 {
     type Transaction = R::Transaction;
     type Receipt = R::Receipt;
@@ -165,10 +170,7 @@ where
         // the original behavior where gas_used = spent - refunded.
         //
         // Amsterdam+: use block_regular_gas_used.
-        let block_gas_used = if self
-            .spec
-            .is_amsterdam_active_at_timestamp(self.evm.block().timestamp().saturating_to())
-        {
+        let block_gas_used = if self.evm.cfg_env().enable_amsterdam_eip8037 {
             self.block_regular_gas_used
         } else {
             self.cumulative_tx_gas_used
@@ -177,9 +179,12 @@ where
 
         // Use regular part of transaction gas limit to check if it fits inside available block
         // space.
-        let tx_min_gas_limit = min(tx.tx().gas_limit(), TX_GAS_LIMIT_CAP);
+        let mut max_tx_gas_usage = tx.tx().gas_limit();
+        if let Some(tx_gas_limit_cap) = self.evm.cfg_env().tx_gas_limit_cap {
+            max_tx_gas_usage = min(max_tx_gas_usage, tx_gas_limit_cap);
+        }
 
-        if tx_min_gas_limit > block_available_gas {
+        if max_tx_gas_usage > block_available_gas {
             return Err(BlockValidationError::TransactionGasLimitMoreThanAvailableBlockGas {
                 transaction_gas_limit: tx.tx().gas_limit(),
                 block_available_gas,
@@ -200,10 +205,7 @@ where
         })
     }
 
-    fn commit_transaction(
-        &mut self,
-        output: Self::Result,
-    ) -> Result<GasOutput, BlockExecutionError> {
+    fn commit_transaction(&mut self, output: Self::Result) -> GasOutput {
         let EthTxResult { result: ResultAndState { result, state }, blob_gas_used, tx_type } =
             output;
 
@@ -235,7 +237,7 @@ where
         // Commit the state changes.
         self.evm.db_mut().commit(state);
 
-        Ok(GasOutput::with_state_gas(tx_gas_used, state_gas_used))
+        GasOutput::with_state_gas(tx_gas_used, state_gas_used)
     }
 
     fn finish(
@@ -304,10 +306,7 @@ where
 
         // Pre-Amsterdam: use tx_gas_used (with refunds) for the block gas total.
         // Amsterdam+: use max(regular, state) gas without refunds (EIP-8037).
-        let gas_used = if self
-            .spec
-            .is_amsterdam_active_at_timestamp(self.evm.block().timestamp().saturating_to())
-        {
+        let gas_used = if self.evm.cfg_env().enable_amsterdam_eip8037 {
             self.max_block_gas_used()
         } else {
             self.cumulative_tx_gas_used
@@ -384,12 +383,19 @@ where
     R: ReceiptBuilder<Transaction: Transaction + Encodable2718, Receipt: TxReceipt<Log = Log>>,
     Spec: EthExecutorSpec,
     EvmF: EvmFactory<Tx: FromRecoveredTx<R::Transaction> + FromTxWithEncoded<R::Transaction>>,
+    <R::Transaction as TransactionEnvelope>::TxType: Send + 'static,
     Self: 'static,
 {
     type EvmFactory = EvmF;
     type ExecutionCtx<'a> = EthBlockExecutionCtx<'a>;
     type Transaction = R::Transaction;
     type Receipt = R::Receipt;
+    type TxExecutionResult = EthTxResult<
+        <EvmF as EvmFactory>::HaltReason,
+        <R::Transaction as TransactionEnvelope>::TxType,
+    >;
+    type Executor<'a, DB: StateDB, I: Inspector<EvmF::Context<DB>>> =
+        EthBlockExecutor<'a, EvmF::Evm<DB, I>, &'a Spec, &'a R>;
 
     fn evm_factory(&self) -> &Self::EvmFactory {
         &self.evm_factory
@@ -399,10 +405,10 @@ where
         &'a self,
         evm: EvmF::Evm<DB, I>,
         ctx: Self::ExecutionCtx<'a>,
-    ) -> impl BlockExecutorFor<'a, Self, DB, I>
+    ) -> Self::Executor<'a, DB, I>
     where
-        DB: StateDB + 'a,
-        I: Inspector<EvmF::Context<DB>> + 'a,
+        DB: StateDB,
+        I: Inspector<EvmF::Context<DB>>,
     {
         EthBlockExecutor::new(evm, ctx, &self.spec, &self.receipt_builder)
     }

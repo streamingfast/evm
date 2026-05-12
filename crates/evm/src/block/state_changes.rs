@@ -83,8 +83,6 @@ pub fn post_block_withdrawals_balance_increments(
 
 /// Applies all withdrawal balance increments if shanghai is active at the given timestamp to the
 /// given `balance_increments` map.
-///
-/// Zero-valued withdrawals are filtered out.
 #[inline]
 pub fn insert_post_block_withdrawals_balance_increments(
     spec: impl EthereumHardforks,
@@ -96,10 +94,8 @@ pub fn insert_post_block_withdrawals_balance_increments(
     if spec.is_shanghai_active_at_timestamp(block_timestamp) {
         if let Some(withdrawals) = withdrawals {
             for withdrawal in withdrawals {
-                if withdrawal.amount > 0 {
-                    *balance_increments.entry(withdrawal.address).or_default() +=
-                        withdrawal.amount_wei().to::<u128>();
-                }
+                *balance_increments.entry(withdrawal.address).or_default() +=
+                    withdrawal.amount_wei().to::<u128>();
             }
         }
     }

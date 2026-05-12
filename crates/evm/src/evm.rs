@@ -5,7 +5,7 @@ use alloy_consensus::transaction::TxHashRef;
 use alloy_primitives::{Address, Bytes, B256};
 use core::{error::Error, fmt::Debug, hash::Hash};
 use revm::{
-    context::result::ExecutionResult,
+    context::{result::ExecutionResult, CfgEnv},
     context_interface::{
         result::{HaltReasonTr, ResultAndState},
         ContextTr,
@@ -26,7 +26,7 @@ impl<T> Database for T where T: revm::Database<Error: Error + Send + Sync + 'sta
 /// Executing a transaction will return the outcome of the transaction.
 pub trait Evm {
     /// Database type held by the EVM.
-    type DB;
+    type DB: Database;
     /// The transaction object that the EVM will execute.
     ///
     /// This type represents the transaction environment that the EVM operates on internally.
@@ -63,6 +63,9 @@ pub trait Evm {
 
     /// Reference to [`Evm::BlockEnv`].
     fn block(&self) -> &Self::BlockEnv;
+
+    /// Reference to [`CfgEnv`].
+    fn cfg_env(&self) -> &CfgEnv<Self::Spec>;
 
     /// Returns the chain ID of the environment.
     fn chain_id(&self) -> u64;
